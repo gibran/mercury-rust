@@ -97,7 +97,7 @@ Directories/crates of the project are
    and network protocols plus some common utility code.
    Your starting point is maybe `protocol/mercury.capnp` describing a simple
    network protocol with Cap'n'Proto while `lib.rs` translates it to business logic in Rust. 
-   Note that the `handshake` modul is only for testing, we'll drop it when a
+   Note that the `handshake` module is only for testing, we'll drop it when a
    Diffie-Hellman key exchange is properly implemented.
  - `home-node` implements a server for the protocol.
  - `connect` implements a client. You can use `HomeClientCapnProto` from `protocol_capnp.rs`
