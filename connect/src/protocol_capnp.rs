@@ -150,11 +150,11 @@ impl Home for HomeClientCapnProto
     }
 
 
-    fn login(&self, profile_id: &ProfileId) ->
+    fn login(&self, proof_of_home: &RelationProof) ->
         Box< Future<Item=Rc<HomeSession>, Error=ErrorToBeSpecified> >
     {
         let mut request = self.home.login_request();
-        request.get().set_profile_id( profile_id.into() );
+        request.get().init_proof_of_home().fill_from(proof_of_home);
 
         let handle_clone = self.handle.clone();
         let resp_fut = request.send().promise
@@ -500,12 +500,15 @@ impl IncomingCall for IncomingCallCapnProto
 {
     fn request_details(&self) -> &CallRequestDetails { &self.request }
 
-    fn answer(self: Box<Self>, to_callee: Option<AppMsgSink>)
+    fn answer(self: Box<Self>, to_callee: Option<AppMsgSink>) -> CallRequestDetails
     {
-        match self.sender.send(to_callee)
+        // NOTE needed to dereference Box because otherwise the whole self is moved at its first dereference
+        let this = *self;
+        match this.sender.send(to_callee)
         {
             Ok( () ) => {},
             Err(_e) => {}, // TODO what to do with the error? Only log or can we handle it somehow?
-        }
+        };
+        this.request
     }
 }

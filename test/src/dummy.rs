@@ -341,13 +341,14 @@ impl Home for MyDummyHome
     }
 
     // NOTE this closes all previous sessions of the same profile
-    fn login(&self, profile: &ProfileId) ->
+    fn login(&self, proof: &RelationProof) ->
     Box< Future< Item=Rc<HomeSession>, Error=ErrorToBeSpecified > >{
-        println!("MyDummyHome.login");
-        //let selfcell = Rc::new(RefCell::new(*self));
-        let session = Rc::new(HomeSessionDummy::new( profile.to_owned() ,Rc::clone(&self.storage_layer)/*, selfcell */) ) as Rc<HomeSession>;
-        Box::new( future::ok( session ) )
-        //Box::new( future::err(ErrorToBeSpecified::TODO(String::from("MyDummyHome.login "))) )
+        unimplemented!();
+//        println!("MyDummyHome.login");
+//        //let selfcell = Rc::new(RefCell::new(*self));
+//        let session = Rc::new(HomeSessionDummy::new( profile.to_owned() ,Rc::clone(&self.storage_layer)/*, selfcell */) ) as Rc<HomeSession>;
+//        Box::new( future::ok( session ) )
+//        //Box::new( future::err(ErrorToBeSpecified::TODO(String::from("MyDummyHome.login "))) )
 
     } 
 
@@ -489,7 +490,5 @@ impl IncomingCall for Incall{
     fn request_details(&self) -> &CallRequestDetails{
         &self.request
     }
-    fn answer(self: Box<Self>, to_callee: Option<AppMsgSink>){
-        
-    }
+    fn answer(self: Box<Self>, to_callee: Option<AppMsgSink>) -> CallRequestDetails { self.request }
 }
