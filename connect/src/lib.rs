@@ -15,7 +15,7 @@ extern crate tokio_io;
 
 use std::rc::Rc;
 
-use futures::{future, Future};
+use futures::{future, Future, IntoFuture};
 
 use mercury_home_protocol::*;
 
@@ -26,6 +26,7 @@ pub use net::SimpleTcpHomeConnector;
 
 pub mod protocol_capnp;
 pub mod sdk;
+pub mod sdk_impl;
 
 pub mod simple_profile_repo;
 pub use simple_profile_repo::SimpleProfileRepo;
@@ -62,12 +63,12 @@ impl Relation
     pub fn new(peer: &Profile, proof: &RelationProof) -> Self
         { Self { peer: peer.clone(), proof: proof.clone() } }
 
-    pub fn call(&self, init_payload: AppMessageFrame,
-                to_caller: Option<AppMsgSink>) ->
-        Box< Future<Item=Option<AppMsgSink>, Error=ErrorToBeSpecified> >
-    {
-        unimplemented!();
-    }
+//    pub fn call(&self, init_payload: AppMessageFrame,
+//                to_caller: Option<AppMsgSink>) ->
+//        Box< Future<Item=Option<AppMsgSink>, Error=ErrorToBeSpecified> >
+//    {
+//        unimplemented!();
+//    }
 }
 
 
@@ -92,13 +93,13 @@ pub trait ProfileGateway
         Box< Future<Item=(), Error=ErrorToBeSpecified> >;
 
 
-    fn pair_request(&self, relation_type: &str, with_profile_url: &str) ->
+    fn pair_request(&self, relation_type: &str, with_profile_id: &ProfileId, pairing_url: Option<&str>) ->
         Box< Future<Item=(), Error=ErrorToBeSpecified> >;
 
-    fn pair_response(&self, rel: Relation) ->
+    fn pair_response(&self, proof: RelationProof) ->
         Box< Future<Item=(), Error=ErrorToBeSpecified> >;
 
-    fn call(&self, rel: Relation, app: ApplicationId, init_payload: AppMessageFrame,
+    fn call(&self, rel: RelationProof, app: ApplicationId, init_payload: AppMessageFrame,
             to_caller: Option<AppMsgSink>) ->
         Box< Future<Item=Option<AppMsgSink>, Error=ErrorToBeSpecified> >;
 
@@ -286,7 +287,7 @@ impl ProfileGateway for ProfileGatewayImpl
     }
 
 
-    fn pair_request(&self, relation_type: &str, with_profile_url: &str) ->
+    fn pair_request(&self, relation_type: &str, with_profile_id: &ProfileId, pairing_url: Option<&str>) ->
         Box< Future<Item=(), Error=ErrorToBeSpecified> >
     {
         let profile_repo_clone = self.profile_repo.clone();
@@ -294,8 +295,12 @@ impl ProfileGateway for ProfileGatewayImpl
         let signer_clone = self.signer.clone();
         let rel_type_clone = relation_type.to_owned();
 
-        let pair_fut = self.profile_repo
-            .resolve(with_profile_url)
+        let profile_fut = match pairing_url {
+            Some(url) => self.profile_repo.resolve(url),
+            None      => self.profile_repo.load(with_profile_id),
+        };
+
+        let pair_fut = profile_fut
             .and_then( move |profile|
             {
                 //let half_proof = ProfileGatewayImpl::new_half_proof(rel_type_clone.as_str(), &profile.id, signer_clone.clone() );
@@ -308,22 +313,42 @@ impl ProfileGateway for ProfileGatewayImpl
     }
 
 
-    fn pair_response(&self, rel: Relation) ->
+    fn pair_response(&self, proof: RelationProof) ->
         Box< Future<Item=(), Error=ErrorToBeSpecified> >
     {
-        let pair_fut = self.any_home_of(&rel.peer)
-            .and_then( move |(_home_proof, home)| home.pair_response(rel.proof) );
+        let peer_id = match proof.peer_id( self.signer.profile_id() ) {
+            Ok(peer_id) => peer_id.to_owned(),
+            Err(e) => return Box::new( Err(e).into_future() ),
+        };
+
+        let pair_fut = self.profile_repo.load(&peer_id)
+            .and_then( {
+                let profile_repo = self.profile_repo.clone();
+                let connector = self.home_connector.clone();
+                let signer = self.signer.clone();
+                move |profile| Self::any_home_of2(&profile, profile_repo, connector, signer)
+            } )
+            .and_then( move |(_home_proof, home)| home.pair_response(proof) );
         Box::new(pair_fut)
     }
 
 
-    fn call(&self, rel: Relation, app: ApplicationId, init_payload: AppMessageFrame,
+    fn call(&self, proof: RelationProof, app: ApplicationId, init_payload: AppMessageFrame,
             to_caller: Option<AppMsgSink>) ->
         Box< Future<Item=Option<AppMsgSink>, Error=ErrorToBeSpecified> >
     {
-        let call_fut = self.any_home_of(&rel.peer)
+        let peer_id = match proof.peer_id( self.signer.profile_id() ) {
+            Ok(id) => id.to_owned(),
+            Err(e) => return Box::new( Err(e).into_future() ),
+        };
+
+        let profile_repo = self.profile_repo.clone();
+        let home_connector = self.home_connector.clone();
+        let signer = self.signer.clone();
+        let call_fut = self.profile_repo.load(&peer_id)
+            .and_then( |profile| Self::any_home_of2(&profile, profile_repo, home_connector, signer) )
             .and_then( move |(_home_proof, home)|
-                home.call(app, CallRequestDetails { relation: rel.proof,
+                home.call(app, CallRequestDetails { relation: proof,
                     init_payload: init_payload, to_caller: to_caller } ) ) ;
         Box::new(call_fut)
     }

@@ -1,69 +1,60 @@
 use super::*;
+use mercury_connect::sdk::*;
+use mercury_home_protocol::*;
+use futures::IntoFuture;
+use futures::Stream;
+use std::rc::Rc;
 
-pub struct Client{
-    cfg: ClientConfig
+pub struct Client {
+    appcx : AppContext,
+    cfg: ClientConfig,
 }
 
 impl Client{
-    pub fn new(cfg: ClientConfig) -> Self{
+    pub fn new(cfg: ClientConfig, appcx: AppContext) -> Self{
         Self{
+            appcx: appcx,
             cfg: cfg,
         }
     }
-
-    pub fn run(&self)->i32{
-        match self.cfg.on_fail {
-            OnFail::Retry => {
-                let mut i : u8 = 1;
-                while i<33{
-                    if self.connect(){
-                        Self::on_event();
-                        return EX_OK
-                    }
-                    else{
-                        warn!("Connection failed, will try again in {} seconds", i);
-                        std::thread::sleep(std::time::Duration::from_secs(i.into()))
-                    }
-                    i=i*2;
-                }
-                warn!("Could not connect after repeated tries, exiting app");
-                return EX_TEMPFAIL;
-            },
-            OnFail::Terminate => {
-                if self.connect(){
-                    Self::on_event();
-                    return EX_OK;
-                }
-                warn!("Could not connect, exiting app");
-                return EX_UNAVAILABLE;
-            },
-        };
-    }
-
-    fn connect(&self)->bool{
-        match self.cfg.addr.as_str(){
-            "addr" => true,
-            _ => false
-        }
-    }
-
-    fn on_event(){
-        panic!("TODO on event");
-    }
 }
 
-impl Future for Client{
-    type Item = i32;
+impl IntoFuture for Client {
+    type Item = ();
     type Error = std::io::Error;
-    fn poll(&mut self) ->
-        std::result::Result<futures::Async<<Self as futures::Future>::Item>, <Self as futures::Future>::Error>{
-            match self.run(){
-                0=>Ok(futures::Async::Ready(0)),
-                EX_UNAVAILABLE=> Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "NOTCONNECTED")),
-                EX_TEMPFAIL=> Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TIMEOUT")),
-                EX_SOFTWARE=> Err(std::io::Error::new(std::io::ErrorKind::Other, "UNDEFINED ERROR")),
-                _=>Ok(futures::Async::NotReady)
-            }
-            
+    type Future = Box<Future<Item=Self::Item, Error=Self::Error>>;
+
+    fn into_future(self) -> Self::Future {
+        let callee_profile_id = self.cfg.callee_profile_id.clone();
+
+        let f = (self.appcx.gateway as Rc<ProfileGateway>).initialize(&ApplicationId("buttondapp".into()), &self.appcx.handle)
+        .map_err(|_err| std::io::Error::new(std::io::ErrorKind::Other, "Could not initialize MercuryConnect"))
+        .and_then(move |mercury_app|{
+            info!("application initialized, calling {:?}", callee_profile_id);
+            mercury_app.call(&callee_profile_id, AppMessageFrame(vec![]))
+                    .map_err(|err| {
+                        error!("call failed: {:?}", err);
+                        ()
+                    })
+                    .and_then(|call: Call| {
+                        info!("call accepted, waiting for incoming messages");
+                        call.receiver
+                            .for_each(|msg: Result<AppMessageFrame, String>| {
+                                match msg {
+                                    Ok(frame) => {
+                                        info!("got message {:?}", frame); 
+                                        Ok(())
+                                    },
+                                    Err(errmsg) => {
+                                        warn!("got error {:?}", errmsg); 
+                                        Err(())
+                                    }
+                                }
+                            })                        
+                    })
+                    .map_err(|_err| std::io::Error::new(std::io::ErrorKind::Other, "encountered error"))
+        });
+        Box::new(f)
     }
 }
+

@@ -1,25 +1,31 @@
 use std::rc::Rc;
 
-use futures::Future;
+use futures::{Future, IntoFuture};
+use tokio_core::reactor;
 
 use mercury_home_protocol::*;
 use mercury_storage::async::KeyValueStore;
+
+use sdk_impl::DAppConnect;
 use super::*;
 
 
 
-pub trait Call
+pub struct Call
 {
-    fn sender(&self) -> &AppMsgSink;
-    fn receiver(&self) -> &AppMsgStream;
+    pub sender   : AppMsgSink,
+    pub receiver : AppMsgStream
+}
+
+pub trait DAppInit
+{
+    // Implies asking the user interface to manually pick a profile the app is used with
+    fn initialize(&self, app: &ApplicationId, handle: &reactor::Handle)
+        -> Box< Future<Item=Rc<DAppApi>, Error=ErrorToBeSpecified> >;
 }
 
 pub trait DAppApi
 {
-    // Implies asking the user interface to manually pick a profile the app is used with
-    fn new(proposed_profile_id: Option<ProfileId>)
-        -> Box< Future<Item=Box<Self>, Error=ErrorToBeSpecified> >;
-
     // Once initialized, the profile is selected and can be queried any time
     fn selected_profile(&self) -> &ProfileId;
 
@@ -29,10 +35,23 @@ pub trait DAppApi
 
     fn checkin(&self) -> Box< Future<Item=HomeStream<Box<IncomingCall>,String>, Error=ErrorToBeSpecified> >;
 
+    // This includes initiating a pair request with the profile if not a relation yet
     fn call(&self, profile_id: &ProfileId, init_payload: AppMessageFrame)
-        -> Box< Future<Item=Box<Call>, Error=ErrorToBeSpecified> >;
+        -> Box< Future<Item=Call, Error=ErrorToBeSpecified> >;
 }
 
+
+
+impl DAppInit for Rc<ProfileGateway>
+{
+    fn initialize(&self, app: &ApplicationId, handle: &reactor::Handle)
+        -> Box< Future<Item=Rc<DAppApi>, Error=ErrorToBeSpecified> >
+    {
+        Box::new( Ok(
+            Rc::new( DAppConnect::new( self.clone(), app, handle) ) as Rc<DAppApi>
+        ).into_future() )
+    }
+}
 
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, PartialOrd, Serialize)]

@@ -6,33 +6,99 @@ extern crate log4rs;
 
 extern crate futures;
 extern crate tokio;
-extern crate tokio_core;
-extern crate tokio_signal;
-extern crate mercury_connect;
+extern crate tokio_io;
 extern crate tokio_uds;
+extern crate tokio_core;
+extern crate tokio_timer;
+extern crate tokio_signal;
+extern crate tokio_executor;
+extern crate either;
+extern crate multiaddr;
 
-pub mod config;
+extern crate mercury_connect;
+extern crate mercury_storage;
+extern crate mercury_home_protocol;
+
+pub mod client_config;
 pub mod client;
+pub mod server_config;
 pub mod server;
+pub mod cli;
 pub mod logging;
 pub mod function;
 pub mod application;
+// pub mod signal_handling;
 
-use config::*;
+use cli::cli;
 use function::*;
 use server::Server;
 use client::Client;
+use client_config::*;
+use server_config::*;
 use logging::start_logging;
-use application::{Application, EX_OK, EX_SOFTWARE, EX_UNAVAILABLE, EX_TEMPFAIL};
+use application::{Application, EX_OK, EX_SOFTWARE, EX_USAGE};
+
+use std::rc::Rc;
+use std::net::SocketAddr;
 
 use clap::{App, ArgMatches};
 
-use futures::{future, Future, Stream};
+use futures::Future;
+use futures::{IntoFuture, Stream};
 
-use tokio_uds::*;
-use tokio::io::read_to_end;
-use tokio_core::reactor::Core;
-use tokio_signal::unix::{SIGINT, SIGUSR1, SIGUSR2};
+use tokio_signal::unix::SIGINT;
+use tokio_core::reactor::{Core, Handle};
+use tokio_timer::*;
+
+use multiaddr::{Multiaddr, ToMultiaddr};
+
+use mercury_connect::*;
+use mercury_connect::net::SimpleTcpHomeConnector;
+use mercury_connect::sdk::{DAppInit, DAppApi};
+use mercury_connect::{SimpleProfileRepo, ProfileGatewayImpl, ProfileGateway};
+use mercury_home_protocol::*;
+use mercury_home_protocol::AppMessageFrame;
+use mercury_home_protocol::crypto::Ed25519Signer;
+
+
+pub struct AppContext{
+    priv_key: PrivateKey,
+    home_pub: PublicKey,
+    home_address: SocketAddr,
+    gateway: Rc<ProfileGateway>,
+    handle: Handle,
+}
+
+impl AppContext{
+    pub fn new(priv_key: &str, node_id: &str, node_addr: &str, handle: Handle)->Result<Self, std::io::Error>{
+        let server_pub = PublicKey(std::fs::read(node_id)?);
+        let private_key = PrivateKey(std::fs::read(priv_key)?);
+        let server_id = ProfileId::from(&server_pub);
+
+        let addr :SocketAddr = node_addr.parse().map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+        let multaddr : Multiaddr = addr.clone().to_multiaddr().expect("Failed to parse server address");
+        
+        let client_signer = Rc::new( Ed25519Signer::new(&private_key).unwrap() );
+        let mut profile_store = SimpleProfileRepo::new();
+        let home_connector = SimpleTcpHomeConnector::new( handle.clone() );
+        let home_profile = Profile::new_home(
+            server_id, 
+            server_pub.clone(), 
+            multaddr
+        );
+        profile_store.insert(home_profile);
+        
+        let profile_gw = Rc::new(ProfileGatewayImpl::new(client_signer, Rc::new(profile_store),  Rc::new(home_connector)));
+
+        Ok(Self{
+            priv_key: private_key,
+            home_pub: server_pub,
+            home_address: addr,
+            gateway: profile_gw,
+            handle
+        })
+    }
+}
 
 #[derive(Debug)]
 pub enum OnFail {
@@ -47,129 +113,88 @@ enum Mode{
 
 fn application_code() -> i32 {
     match application_code_internal() {
-        Ok(_) =>
-            0,
-        Err(err) =>
-            42
+        Ok(_) => 
+            EX_OK,
+        Err(err) => {       
+            error!("application failed: {}", err);
+            match err.kind() {
+                std::io::ErrorKind::InvalidInput => EX_USAGE,
+                _ => EX_SOFTWARE
+            }
+        }
     }
 }
 
 fn application_code_internal() -> Result<(), std::io::Error> {
     //ARGUMENT HANDLING START
-    let yaml = load_yaml!("cli.yml");
-    let matches = App::from_yaml(yaml).get_matches();
+    let matches = cli().get_matches();
 
-    //VERSION
-    if matches.is_present("version"){
-        println!("The Button Dapp >>> version: 0.1 pre-alpha");
+    // Print version
+    if matches.is_present(cli::CLI_VERSION){
+        println!("The Button dApp 0.1 pre-alpha");
+        return Ok(())
     }
-    //VERBOSITY HANDLING
-    match matches.occurrences_of("verbose") {
-        0 => {
-            start_logging("o");
-            println!("verbose 0: logging off")
-        },
-        1 => {
-            start_logging("w");
-            warn!("verbose 1: logging warn")
-        },
-        2 => {
-            start_logging("i");
-            info!("verbose 2: logging info")
-        },
-        3 | _ => {
-            start_logging("d");
-            debug!("verbose 3 or more: debug")
-        },
-    }
-    // LOGGING START
-    debug!("Starting TheButtonDapp...");
 
-    //SERVER MODE HANDLING
+    // Initialize logging
+    match matches.occurrences_of(cli::CLI_VERSION) {
+        1 => start_logging("d"),
+        2 => start_logging("t"),
+        0|_ => start_logging("i"),                
+    }
+
+    // Creating a reactor
+    let mut reactor = Core::new().unwrap();
+
+    // Constructing application context from command line args
+    let appcx = AppContext::new(
+        matches.value_of(cli::CLI_PRIVATE_KEY_FILE).unwrap(), 
+        matches.value_of(cli::CLI_HOME_NODE_KEY_FILE).unwrap(), 
+        matches.value_of(cli::CLI_SERVER_ADDRESS).unwrap(),
+        reactor.handle())?;
+
+    // Creating application object
     let (sub_name, sub_args) = matches.subcommand();
-    
     let app_mode = match sub_args {
         Some(args)=>{
             match sub_name{
-                "server"=>{
+                cli::CLI_SERVER => 
                     ServerConfig::new_from_args(args.to_owned())
-                        .map( |cfg| 
-                            Mode::Server(Server::new(cfg))
-                        )
-                    
-                    
-                },
-                "client"=>{
+                        .map( |cfg|
+                            Mode::Server(Server::new(cfg, appcx))
+                        ),
+                cli::CLI_CLIENT => 
                     ClientConfig::new_from_args(args.to_owned())
                         .map( |cfg| 
-                            Mode::Client(Client::new(cfg))
-                        )
-                },
-                _=>{
-                    Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "failed to parse subcommand"))
-                }
+                            Mode::Client(Client::new(cfg, appcx))
+                        ),
+                _=> 
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown subcommand '{}'", sub_name)))
+                
+                
             }
         },
-        None=>{
-            warn!("No subcommand given, starting in server mode");
-            Ok(Mode::Server(Server::default()))
-        }
+        _=> 
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "subcommand missing"))
     };
 
-    // SIGNAL HANDLER STREAMS
-    let c = signal_recv(SIGINT).for_each(|_| {
-        info!("SIGINT received!");
-        Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "SIGINT"))
-    });
-
-    let u1 = signal_recv(SIGUSR1).for_each(|_| {
-        info!("SIGUSR1 received!");
-        Server::generate_event();
-        Ok(())
-    });
-
-    let u2 = signal_recv(SIGUSR2).for_each(|_| {
-        info!("SIGUSR2 received!");
-        Server::stop_event_generation();
-        Ok(())
-    });
-
-    //TOKIO RUN
-    //TODO expand errors if needed
-    let mut reactor = Core::new().unwrap();
-    
-    let core_fut = Future::join3(c,u1,u2);
+    // Running the application
 
     let app_fut = match app_mode? {
         Mode::Client(client_fut) => 
-            Box::new(client_fut) as Box<Future<Item=i32, Error=std::io::Error>>,
-
+            Box::new(client_fut.into_future()),
         Mode::Server(server_fut) => 
-            Box::new(server_fut) as Box<Future<Item=i32, Error=std::io::Error>>,  
+            Box::new(server_fut.into_future()),  
     };
 
-    match reactor.run({
-            core_fut.join(app_fut)
-            .map(|_|return EX_OK)
-            .map_err(|err| {
-                match err.kind(){
-                    std::io::ErrorKind::Interrupted => {
-                        warn!("exiting on SIGINT");
-                        return EX_OK;
-                    }std::io::ErrorKind::NotConnected => {
-                        return EX_UNAVAILABLE;
-                    }std::io::ErrorKind::TimedOut => {
-                        return EX_TEMPFAIL;
-                    }_=>{
-                        return EX_SOFTWARE;
-                    }
-                }
-            })
-    }){
-        Ok(code)=>code,
-        Err(code)=>code   
-    };
-    Ok(())
+    // SIGINT is terminating the server
+    let sigint_fut = signal_recv(SIGINT).into_future()
+        .map(|_| {
+            info!("received SIGINT, terminating application");
+            ()
+        })
+        .map_err(|(err, _)| err);
+
+    reactor.run(app_fut.select(sigint_fut).map(|(item, _)| item).map_err(|(err, _)| err))
 }
 
 fn main() {

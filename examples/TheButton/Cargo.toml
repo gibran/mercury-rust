@@ -5,13 +5,19 @@ authors = ["Deusz <lovaszoltanr@gmail.com>"]
 
 [dependencies]
 clap ={version = "*", features = ["yaml"]}
+either = "*"
 log = "*"
 log4rs = "*"
 tempdir = "*"
 futures = "*"
 tokio = "*"
+tokio-executor = "*"
 tokio-signal = "*"
+tokio-timer = "*"
 tokio-core = "*"
 tokio-uds = "*"
 tokio-io = "*"
-mercury-connect = {git = "https://github.com/libertaria-project/mercury-rust.git", branch = "master"}
+multiaddr = "*"
+mercury-home-protocol = { path="../../home-protocol" }
+mercury-storage = {path="../../storage"}
+mercury-connect = {path="../../connect"}
