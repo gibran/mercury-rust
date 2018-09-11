@@ -1,6 +1,6 @@
-use super::*;
-
 use clap::{App, Arg, SubCommand, AppSettings};
+
+
 
 pub const CLI_VERSION : &str = "version";
 pub const CLI_VERBOSE : &str = "verbose";
@@ -27,9 +27,9 @@ pub fn cli<'a, 'b>()->App<'a, 'b>{
 
                 Server - Able to provide notifications to connected clients in case of events. 
                 Events can be raised via a timer, or via signal (SIGUSR1).")
-        .arg(Arg::with_name(CLI_VERSION)
+        .arg(Arg::with_name(CLI_VERBOSE)
             .short("v")
-            .long(CLI_VERSION)
+            .long(CLI_VERBOSE)
             .multiple(true)
             .help("Sets the level of verbosity")
         )

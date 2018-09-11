@@ -80,7 +80,7 @@ impl TestClient
         let client_capnp = HomeClientCapnProto::new(
             receiver_from_server,
             sender_from_client,
-            home_context.clone(),
+            //home_context.clone(),
             handle.clone()
         );
 
@@ -309,7 +309,7 @@ fn test_home_call(mut setup: TestSetup)
                 Err(_) => panic!(),
             }
         })
-        .map_err(|_| ErrorToBeSpecified::TODO("error".to_owned()))
+        .map_err(|_| mercury_home_protocol::ErrorKind::CallFailed.into())
         .collect();
 
     let call_and_answer = forward_sink_fut.join(backwards_sink_fut);

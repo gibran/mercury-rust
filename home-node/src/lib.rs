@@ -12,8 +12,9 @@ extern crate multiaddr;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate toml;
-
+extern crate failure;
 
 pub mod config;
 pub mod protocol_capnp;
 pub mod server;
+

@@ -1,3 +1,5 @@
+#![recursion_limit = "1024"]
+
 extern crate bincode;
 extern crate bytes;
 extern crate capnp;
@@ -8,15 +10,25 @@ extern crate futures;
 #[macro_use]
 extern crate log;
 extern crate multiaddr;
+extern crate multibase;
 extern crate multihash;
 extern crate serde;
+
+#[macro_use] 
+extern crate failure;
+
+
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
 extern crate signatory;
+extern crate signatory_dalek;
 extern crate tokio_core;
 extern crate tokio_io;
 
+
 use std::{rc::Rc, str};
+use std::fmt::Display;
 
 use bincode::serialize;
 use futures::{Future, sync::mpsc};
@@ -25,8 +37,7 @@ use serde::{Deserialize, Deserializer, Serializer};
 use serde::{de::Error as DeSerError, ser::SerializeSeq};
 
 use crypto::{ProfileValidator, SignatureValidator};
-
-
+use failure::{Fail, Backtrace, Context};
 
 pub mod crypto;
 pub mod handshake;
@@ -35,11 +46,6 @@ pub mod mercury_capnp;
 
 
 pub const CHANNEL_CAPACITY: usize = 1;
-
-
-// TODO
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub enum ErrorToBeSpecified { TODO(String) }
 
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, PartialOrd, Serialize)]
@@ -54,7 +60,140 @@ pub struct PrivateKey(pub Vec<u8>);
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, PartialOrd, Serialize)]
 pub struct Signature(pub Vec<u8>);
 
+#[derive(Debug)]
+pub struct Error {
+    inner: Context<ErrorKind>
+}
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Fail)]
+pub enum ErrorKind {
+    #[fail(display= "profile lookup failed")]
+    ProfileLookupFailed,
+    #[fail(display="profile update failed")]
+    ProfileUpdateFailed,
+    #[fail(display= "hash decode failed")]
+    HashDecodeFailed,
+    #[fail(display= "hash encode failed")]
+    HashEncodeFailed,
+    #[fail(display= "signer creation failed")]
+    SignerCreationFailed,
+    #[fail(display= "signature validation failed")]
+    SignatureValidationFailed,
+    #[fail(display= "handshake failed")]
+    TlsHandshakeFailed,    
+    #[fail(display= "relation signing failed")]
+    RelationSigningFailed,
+    #[fail(display= "relation validation failed")]
+    RelationValidationFailed,
+    #[fail(display= "profile validation failed")]
+    ProfileValidationFailed,
+    #[fail(display= "multiaddress serialization failed")]
+    MultiaddrSerializationFailed,
+    #[fail(display= "multiaddress deserialization failed")]
+    MultiaddrDeserializationFailed,
+    #[fail(display= "failed to fetch peer id")]
+    PeerIdRetreivalFailed,
+    #[fail(display= "profile claim failed")]
+    FailedToClaimProfile,
+    #[fail(display="persona expected")]
+    PersonaExpected,
+    #[fail(display="already registered")]
+    AlreadyRegistered,
+    #[fail(display="home id mismatch")]
+    HomeIdMismatch,
+    #[fail(display="relation type mismatch")]
+    RelationTypeMismatch,
+    #[fail(display="invalid signature")]
+    InvalidSignature,
+    #[fail(display="storage failed")]
+    StorageFailed,
+    #[fail(display= "profile mismatch")]
+    ProfileMismatch,
+    #[fail(display="public key mismatch")]
+    PublicKeyMismatch,
+    #[fail(display="signer mismatch")]
+    SignerMismatch,
+    #[fail(display="peer not hosted here")]
+    PeerNotHostedHere,
+    #[fail(display="invalid relation proof")]
+    InvalidRelationProof,
+    #[fail(display="timeout failed")]
+    TimeoutFailed,
+    #[fail(display="failed to read response")]
+    FailedToReadResponse,
+    #[fail(display="deregistered")]
+    ProfileDeregistered,
+    #[fail(display= "profile load failed")]
+    FailedToLoadProfile,
+    #[fail(display="peer request failed")]
+    CallFailed,
+    #[fail(display="failed to push event")]
+    FailedToPushEvent,
+    #[fail(display= "connection to home failed")]
+    ConnectionToHomeFailed,
+    #[fail(display="failed to send")]
+    FailedToSend,
+    #[fail(display="context validation failed")]
+    ContextValidationFailed,
+    #[fail(display="failed to get session")]
+    FailedToGetSession,
+    #[fail(display="failed to resolve URL")]
+    FailedToResolveUrl,
+    #[fail(display="pair request failed")]
+    PairRequestFailed,
+    #[fail(display="profile deregistration failed")]
+    UnregisterFailed,
+    #[fail(display="failed to create session")]
+    FailedToCreateSession,
+    #[fail(display="response failed")]
+    ResponseFailed,
+    #[fail(display="DHT lookup failed")]
+    DhtLookupFailed,
+    #[fail(display="ping failed")]
+    PingFailed,
+    #[fail(display="login failed")]
+    LoginFailed,
+}
+
+impl PartialEq for Error {
+    fn eq(&self, other: &Error) -> bool {
+        self.inner.get_context() == other.inner.get_context()
+    }
+}
+
+impl Fail for Error {
+    fn cause(&self) -> Option<&Fail> {
+        self.inner.cause()
+    }
+
+    fn backtrace(&self) -> Option<&Backtrace> {
+        self.inner.backtrace()
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        Display::fmt(&self.inner, f)
+    }
+}
+
+impl Error {
+    pub fn kind(&self) -> ErrorKind {
+        *self.inner.get_context()
+    }
+}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Error {
+        Error { inner: Context::new(kind) }
+    }
+}
+
+impl From<Context<ErrorKind>> for Error {
+    fn from(inner: Context<ErrorKind>) -> Error {
+        Error { inner: inner }
+    }
+}
 
 /// Something that can sign data, but cannot give out the private key.
 /// Usually implemented using a private key internally, but also enables hardware wallets.
@@ -141,8 +280,8 @@ pub struct PeerContext
 
 
 
-pub type HomeStream<Elem, RemoteErr> = mpsc::Receiver< Result<Elem, RemoteErr> >;
-pub type HomeSink<Elem, RemoteErr>   = mpsc::Sender< Result<Elem, RemoteErr> >;
+pub type HomeStream<Elem, RemoteErr> = mpsc::Receiver< std::result::Result<Elem, RemoteErr> >;
+pub type HomeSink<Elem, RemoteErr>   = mpsc::Sender< std::result::Result<Elem, RemoteErr> >;
 
 /// Potentially a whole network of nodes with internal routing and sharding
 pub trait ProfileRepo
@@ -154,7 +293,7 @@ pub trait ProfileRepo
     /// Look for specified `id` and return. This might involve searching for the latest version
     /// of the profile in the dht, but if it's the profile's home server, could come from memory, too.
     fn load(&self, id: &ProfileId) ->
-        Box< Future<Item=Profile, Error=ErrorToBeSpecified> >;
+        Box< Future<Item=Profile, Error=Error> >;
 
     /// Same as load(), but also contains hints for resolution, therefore it's more efficient than load(id)
     ///
@@ -164,7 +303,7 @@ pub trait ProfileRepo
     /// * ProfileID of its home server
     /// * last known multiaddress(es) of its home server
     fn resolve(&self, url: &str) ->
-        Box< Future<Item=Profile, Error=ErrorToBeSpecified> >;
+        Box< Future<Item=Profile, Error=Error> >;
 
     // TODO notifications on profile updates should be possible
 }
@@ -298,31 +437,31 @@ pub trait Home: ProfileRepo
 {
     // NOTE because we support multihash, the id cannot be guessed from the public key
     fn claim(&self, profile: ProfileId) ->
-        Box< Future<Item=OwnProfile, Error=ErrorToBeSpecified> >;
+        Box< Future<Item=OwnProfile, Error=Error> >;
 
     // TODO consider how to enforce overwriting the original ownprofile with the modified one
     //      with the pairing proof, especially the error case
     fn register(&self, own_prof: OwnProfile, half_proof: RelationHalfProof, invite: Option<HomeInvitation>) ->
-        Box< Future<Item=OwnProfile, Error=(OwnProfile,ErrorToBeSpecified)> >;
+        Box< Future<Item=OwnProfile, Error=(OwnProfile,Error)> >;
 
     /// By calling this method, any active session of the same profile is closed.
     fn login(&self, proof_of_home: &RelationProof) ->
-        Box< Future<Item=Rc<HomeSession>, Error=ErrorToBeSpecified> >;
+        Box< Future<Item=Rc<HomeSession>, Error=Error> >;
 
     /// The peer in `half_proof` must be hosted on this home server.
     /// Returns Error if the peer is not hosted on this home server or an empty result if it is.
     /// Note that the peer will directly invoke `pair_response` on the initiator's home server and call pair_response to send PairingResponse event
     fn pair_request(&self, half_proof: RelationHalfProof) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >;
+        Box< Future<Item=(), Error=Error> >;
 
     fn pair_response(&self, rel: RelationProof) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >;
+        Box< Future<Item=(), Error=Error> >;
 
     // NOTE initiating a real P2P connection (vs a single frame push notification),
     //      the caller must fill in some message channel to itself.
     //      A successful call returns a channel to callee.
     fn call(&self, app: ApplicationId, call_req: CallRequestDetails) ->
-        Box< Future<Item=Option<AppMsgSink>, Error=ErrorToBeSpecified> >;
+        Box< Future<Item=Option<AppMsgSink>, Error=Error> >;
 
 // TODO consider how to do this in a later milestone
 //    fn presence(&self, rel: Relation, app: ApplicationId) ->
@@ -364,12 +503,12 @@ pub trait IncomingCall
 pub trait HomeSession
 {
     fn update(&self, own_prof: OwnProfile) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >;
+        Box< Future<Item=(), Error=Error> >;
 
     // NOTE newhome is a profile that contains at least one HomeFacet different than this home
     // TODO should we return a modified OwnProfile here with this home removed from the homes of persona facet in profile?
     fn unregister(&self, newhome: Option<Profile>) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >;
+        Box< Future<Item=(), Error=Error> >;
 
 
     fn events(&self) -> HomeStream<ProfileEvent, String>;
@@ -379,7 +518,7 @@ pub trait HomeSession
 
     // TODO remove this after testing
     fn ping(&self, txt: &str) ->
-        Box< Future<Item=String, Error=ErrorToBeSpecified> >;
+        Box< Future<Item=String, Error=Error> >;
 
 
 // TODO ban features are delayed to a later milestone
@@ -400,6 +539,14 @@ pub trait HomeSession
 //      in this module to work in Rust but otherwise not strictly part of the protocol
 // ----------------------------------------------------------------------------------
 
+// NOTE this is identical to the currently experimental std::convert::TryFrom.
+//      Hopefully this will not be needed soon when it stabilizes.
+pub trait TryFrom<T> : Sized {
+    type Error;
+    fn try_from(value: T) -> Result<Self, Self::Error>;
+}
+
+
 impl<'a> From<&'a [u8]> for ProfileId
 {
     fn from(src: &'a [u8]) -> Self
@@ -419,8 +566,29 @@ impl<'a> From<ProfileId> for Vec<u8>
 }
 
 
+impl<'a> From<&'a str> for ProfileId
+{
+    fn from(src: &'a str) -> Self
+        { ProfileId( src.as_bytes().to_owned() ) }
+}
 
-fn serialize_multiaddr_vec<S>(x: &Vec<Multiaddr>, s: S) -> Result<S::Ok, S::Error>
+impl<'a> TryFrom<&'a ProfileId> for &'a str
+{
+    type Error = ::std::str::Utf8Error;
+    fn try_from(src: &'a ProfileId) -> Result<Self, Self::Error>
+        { ::std::str::from_utf8(&src.0) }
+}
+
+impl<'a> TryFrom<ProfileId> for String
+{
+    type Error = ::std::string::FromUtf8Error;
+    fn try_from(src: ProfileId) -> Result<Self, Self::Error>
+        { String::from_utf8(src.0) }
+}
+
+
+
+fn serialize_multiaddr_vec<S>(x: &Vec<Multiaddr>, s: S) -> std::result::Result<S::Ok, S::Error>
     where S: Serializer,
 {
     let mut seq = s.serialize_seq(Some(x.len()))?;
@@ -433,7 +601,7 @@ fn serialize_multiaddr_vec<S>(x: &Vec<Multiaddr>, s: S) -> Result<S::Ok, S::Erro
     seq.end()
 }
 
-fn deserialize_multiaddr_vec<'de, D>(deserializer: D) -> Result<Vec<Multiaddr>, D::Error>
+fn deserialize_multiaddr_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<Multiaddr>, D::Error>
     where D: Deserializer<'de>,
 {
     let mapped: Vec<String> = Deserialize::deserialize(deserializer)?;
@@ -478,12 +646,12 @@ impl PeerContext
     pub fn peer_pubkey(&self) -> &PublicKey { &self.peer_pubkey }
     pub fn peer_id(&self) -> &ProfileId { &self.peer_id }
 
-    pub fn validate(&self, validator: &Validator) -> Result<(),ErrorToBeSpecified>
+    pub fn validate(&self, validator: &Validator) -> Result<(), Error>
     {
         validator.validate_profile( self.peer_pubkey(), self.peer_id() )
             .and_then( |valid|
                 if valid { Ok( () ) }
-                else { Err( ErrorToBeSpecified::TODO( "Peer context is invalid".to_owned() ) ) } )
+                else { Err( ErrorKind::ProfileValidationFailed )? } )
     }
 }
 
@@ -547,11 +715,11 @@ impl RelationProof
     }
 
     pub fn sign_remaining_half(half_proof: &RelationHalfProof, signer: &Signer)
-        -> Result<Self, ErrorToBeSpecified>
+        -> Result<Self, Error>
     {
         let my_profile_id = signer.profile_id().to_owned();
         if half_proof.peer_id != my_profile_id
-            { return Err(ErrorToBeSpecified::TODO( "RelationHalfProof peer_id is not my ProfileId, refused to sign".to_owned() ) ); }
+            { Err(ErrorKind::RelationSigningFailed)? }
 
         let signable = RelationSignablePart::new(
             &half_proof.relation_type,
@@ -562,23 +730,23 @@ impl RelationProof
                        &my_profile_id, &signable.sign(signer) ) )
     }
 
-    pub fn peer_id(&self, my_id: &ProfileId) -> Result<&ProfileId, ErrorToBeSpecified> {
+    pub fn peer_id(&self, my_id: &ProfileId) -> Result<&ProfileId, Error> {
         if self.a_id == *my_id {
             Ok(&self.b_id)
         } else if self.b_id == *my_id {
             Ok(&self.a_id)
         } else {
-            Err(ErrorToBeSpecified::TODO(format!("{:?} is not present in relation {:?}", my_id, self)))
+            Err(ErrorKind::PeerIdRetreivalFailed)?
         }
     }
 
-    pub fn peer_signature(&self, my_id: &ProfileId) -> Result<&Signature, ErrorToBeSpecified> {
+    pub fn peer_signature(&self, my_id: &ProfileId) -> Result<&Signature, Error> {
         if self.a_id == *my_id {
             Ok(&self.b_signature)
         } else if self.b_id == *my_id {
             Ok(&self.a_signature)
         } else {
-            Err(ErrorToBeSpecified::TODO(format!("{:?} is not present in relation {:?}", my_id, self)))
+            Err(ErrorKind::PeerIdRetreivalFailed)?
         }
     }
 }
@@ -587,7 +755,7 @@ impl RelationProof
 
 pub trait Validator: ProfileValidator + SignatureValidator
 {
-    fn validate_half_proof(&self, half_proof: &RelationHalfProof, signer_public_key: &PublicKey) -> Result<(), ErrorToBeSpecified> {
+    fn validate_half_proof(&self, half_proof: &RelationHalfProof, signer_public_key: &PublicKey) -> Result<(), Error> {
         self.validate_signature(signer_public_key,
             &RelationSignablePart::from(half_proof).serialized(), &half_proof.signature)?;
         Ok(())
@@ -600,7 +768,7 @@ pub trait Validator: ProfileValidator + SignatureValidator
         public_key_1: &PublicKey,
         id_2: &ProfileId,
         public_key_2: &PublicKey
-    ) -> Result<(), ErrorToBeSpecified> {
+    ) -> Result<(), Error> {
         // TODO consider inverting relation_type for different directions
         let signable_a = RelationSignablePart::new(
             &relation_proof.relation_type,
@@ -615,7 +783,9 @@ pub trait Validator: ProfileValidator + SignatureValidator
         ).serialized();
 
         let peer_of_id_1 = relation_proof.peer_id(&id_1)?;
-        if peer_of_id_1 != id_2 {return Err(ErrorToBeSpecified::TODO("The relation does not contain both id_1 and id_2".to_owned()));}
+        if peer_of_id_1 != id_2 {
+            Err(ErrorKind::RelationValidationFailed)?
+        }
 
         if *peer_of_id_1 == relation_proof.b_id {
             // id_1 is 'proof.id_a'
@@ -631,7 +801,12 @@ pub trait Validator: ProfileValidator + SignatureValidator
     }
 }
 
-
+impl std::fmt::Display for ProfileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let enc = multibase::encode(multibase::Base::Base16, &self.0);
+        write!(f, "{}", &enc[..10])
+    }
+}
 
 #[cfg(test)]
 mod tests

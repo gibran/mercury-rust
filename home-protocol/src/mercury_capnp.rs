@@ -4,7 +4,7 @@ use futures::prelude::*;
 use futures::{future, Sink, sync::mpsc};
 use tokio_core::reactor;
 
-use ::{AppMessageFrame, AppMsgSink};
+use ::{AppMessageFrame, AppMsgSink, TryFrom};
 
 include!( concat!( env!("OUT_DIR"), "/protocol/mercury_capnp.rs" ) );
 
@@ -17,14 +17,6 @@ pub trait PromiseUtil<T,E>
 }
 
 impl<T,E> PromiseUtil<T,E> for Promise<T,E> {}
-
-
-// NOTE this is identical to the currently experimental std::convert::TryFrom.
-//      Hopefully this will not be needed soon when it stabilizes.
-pub trait TryFrom<T> : Sized {
-    type Error;
-    fn try_from(value: T) -> Result<Self, Self::Error>;
-}
 
 
 
@@ -149,7 +141,7 @@ impl<'a> TryFrom<home_invitation::Reader<'a>> for ::HomeInvitation
 {
     type Error = capnp::Error;
 
-    fn try_from(src: home_invitation::Reader) -> Result<Self, Self::Error>
+    fn try_from(_src: home_invitation::Reader) -> Result<Self, Self::Error>
     {
         // TODO
         Ok( ::HomeInvitation::new( &::ProfileId("TODO".as_bytes().to_owned()),
@@ -159,7 +151,8 @@ impl<'a> TryFrom<home_invitation::Reader<'a>> for ::HomeInvitation
 
 impl<'a> FillFrom<::HomeInvitation> for home_invitation::Builder<'a>
 {
-    fn fill_from(mut self, src: &::HomeInvitation)
+    // fn fill_from(mut self, src: &::HomeInvitation)
+    fn fill_from(self, _src: &::HomeInvitation)
     {
         // TODO
     }
@@ -364,7 +357,6 @@ mod tests
 {
     use ::*;
     use mercury_capnp::FillFrom;
-    use mercury_capnp::TryFrom;
     use capnp::serialize;
 
     #[test]

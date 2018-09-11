@@ -1,14 +1,15 @@
 use bytes::{Buf, BufMut, BytesMut, IntoBuf};
-use std::error::Error;
 use std::mem;
 use std::rc::Rc;
 
-use bincode::{deserialize, serialize};
 use futures::{future, Future};
+use serde_json::{from_slice, to_vec};
+//bincode::{deserialize, serialize};
 use tokio_core::net::TcpStream;
 use tokio_io::io;
 
-use ::*;
+use super::*;
+
 
 
 #[derive(Deserialize, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Serialize)]
@@ -20,7 +21,7 @@ struct AuthenticationInfo
 
 
 pub fn temp_handshake_until_tls_is_implemented<R,W>(reader: R, writer: W, signer: Rc<Signer>)
-    -> Box< Future<Item=(R, W, PeerContext), Error=ErrorToBeSpecified> >
+    -> Box< Future<Item=(R, W, PeerContext), Error=Error> >
 where R: std::io::Read + tokio_io::AsyncRead + 'static,
       W: std::io::Write + tokio_io::AsyncWrite + 'static
 {
@@ -28,9 +29,9 @@ where R: std::io::Read + tokio_io::AsyncRead + 'static,
     let auth_info = AuthenticationInfo{
         profile_id: signer.profile_id().to_owned(), public_key: signer.public_key().to_owned() };
 
-    let out_bytes = match serialize(&auth_info) {
+    let out_bytes = match to_vec(&auth_info) {
         Ok(data) => data,
-        Err(e) => return Box::new( future::err( ErrorToBeSpecified::TODO( e.description().to_owned() ) ) ),
+        Err(e) => return Box::new( future::err( e.context(ErrorKind::TlsHandshakeFailed).into()) ),
     };
     let bufsize = out_bytes.len() as u32;
 
@@ -56,30 +57,30 @@ where R: std::io::Read + tokio_io::AsyncRead + 'static,
             in_bytes.resize(size_in_bytes as usize, 0);
             io::read_exact(reader, in_bytes)
                 .map( |(reader, buf)| (reader, writer, buf) )
-        } )
-        .map_err( |e| ErrorToBeSpecified::TODO( e.description().to_owned() ) )
+        } )        
         .and_then( |(reader, writer, buf)|
         {
             debug!("Processing peer info received");
-            let peer_auth: AuthenticationInfo = deserialize(&buf)
-                .map_err( |e| ErrorToBeSpecified::TODO( e.description().to_owned() ) )?;
+            let peer_auth: AuthenticationInfo = from_slice(&buf)
+                .map_err( |e| std::io::Error::new( std::io::ErrorKind::Other, e) )?;
             debug!("Received peer identity: {:?}", peer_auth);
             let peer_ctx = PeerContext::new( signer, peer_auth.public_key, peer_auth.profile_id );
             Ok( (reader, writer, peer_ctx) )
-        } );
+        } )
+        .map_err(|err| err.context(ErrorKind::TlsHandshakeFailed).into()); 
     Box::new(handshake_fut)
 }
 
 
 
 pub fn temp_tcp_handshake_until_tls_is_implemented(socket: TcpStream, signer: Rc<Signer>)
-    -> Box< Future<Item=(impl std::io::Read, impl std::io::Write, PeerContext), Error=ErrorToBeSpecified> >
+    -> Box< Future<Item=(impl std::io::Read, impl std::io::Write, PeerContext), Error=Error> >
 {
     use tokio_io::AsyncRead;
 
     match socket.set_nodelay(true) {
         Ok(_) => {},
-        Err(e) => return Box::new( future::err( ErrorToBeSpecified::TODO( e.description().to_owned() ) ) ),
+        Err(e) => return Box::new( future::err(e.context(ErrorKind::TlsHandshakeFailed).into())),
     };
 
     let (reader, writer) = socket.split();

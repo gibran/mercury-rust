@@ -16,7 +16,6 @@ use super::*;
 
 pub struct HomeClientCapnProto
 {
-//    context: PeerContext,
     repo:    profile_repo::Client,
     home:    home::Client,
     handle:  reactor::Handle,
@@ -25,12 +24,11 @@ pub struct HomeClientCapnProto
 
 impl HomeClientCapnProto
 {
-    pub fn new<R,W>(reader: R, writer: W,
-               context: PeerContext, handle: reactor::Handle) -> Self
+    pub fn new<R,W>(reader: R, writer: W, handle: reactor::Handle) -> Self
         where R: std::io::Read + 'static,
               W: std::io::Write + 'static
     {
-        debug!("Initializing Cap'n'Proto");
+        debug!("Initializing Cap'n'Proto Home client");
 
         let rpc_network = Box::new( capnp_rpc::twoparty::VatNetwork::new( reader, writer,
             capnp_rpc::rpc_twoparty_capnp::Side::Client, Default::default() ) );
@@ -43,18 +41,18 @@ impl HomeClientCapnProto
 
         handle.spawn( rpc_system.map_err( |e| warn!("Capnp RPC failed: {}", e) ) );
 
-        Self{ home, repo, handle } //, context }
+        Self{ home, repo, handle }
     }
 
 
-    pub fn new_tcp(tcp_stream: TcpStream, context: PeerContext, handle: reactor::Handle) -> Self
+    pub fn new_tcp(tcp_stream: TcpStream, handle: reactor::Handle) -> Self
     {
         use tokio_io::AsyncRead;
 
         // TODO consider if this unwrap() is acceptable here
         tcp_stream.set_nodelay(true).unwrap();
         let (reader, writer) = tcp_stream.split();
-        HomeClientCapnProto::new(reader, writer, context, handle)
+        HomeClientCapnProto::new(reader, writer, handle)
     }
 }
 
@@ -66,14 +64,16 @@ impl ProfileRepo for HomeClientCapnProto
         HomeStream<Profile, String>
     {
         // TODO properly implement this
-        let (send, recv) = mpsc::channel(CHANNEL_CAPACITY);
-        recv
+        unimplemented!()
+//        let (send, recv) = mpsc::channel(CHANNEL_CAPACITY);
+//        recv
     }
 
 
     fn load(&self, id: &ProfileId) ->
-        Box< Future<Item=Profile, Error=ErrorToBeSpecified> >
+        Box< Future<Item=Profile, Error=mercury_home_protocol::Error> >
     {
+        use mercury_home_protocol::ErrorKind;
         let mut request = self.repo.load_request();
         request.get().set_profile_id( id.into() );
 
@@ -84,15 +84,16 @@ impl ProfileRepo for HomeClientCapnProto
                 let profile = Profile::try_from(profile_capnp);
                 Promise::result(profile)
             } )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed to load: {:?}", e) ) );
+            .map_err( |e| e.context(ErrorKind::FailedToLoadProfile).into() );
 
         Box::new(resp_fut)
     }
 
     // NOTE should be more efficient than load(id) because URL is supposed to contain hints for resolution
     fn resolve(&self, url: &str) ->
-        Box< Future<Item=Profile, Error=ErrorToBeSpecified> >
+        Box< Future<Item=Profile, Error=mercury_home_protocol::Error> >
     {
+        use mercury_home_protocol::ErrorKind;
         let mut request = self.repo.resolve_request();
         request.get().set_profile_url(url);
 
@@ -103,7 +104,7 @@ impl ProfileRepo for HomeClientCapnProto
                 let profile = Profile::try_from(profile_capnp);
                 Promise::result(profile)
             } )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed to resolve: {}", e) ) );
+            .map_err( |e| e.context(ErrorKind::FailedToResolveUrl).into() );
 
         Box::new(resp_fut)
     }
@@ -114,8 +115,9 @@ impl ProfileRepo for HomeClientCapnProto
 impl Home for HomeClientCapnProto
 {
     fn claim(&self, profile_id: ProfileId) ->
-        Box< Future<Item=OwnProfile, Error=ErrorToBeSpecified> >
+        Box< Future<Item=OwnProfile, Error=mercury_home_protocol::Error> >
     {
+        use mercury_home_protocol::ErrorKind;
         let mut request = self.home.claim_request();
         request.get().set_profile_id( (&profile_id).into() );
 
@@ -124,14 +126,14 @@ impl Home for HomeClientCapnProto
                 resp.get()
                     .and_then( |res| res.get_own_profile() )
                     .and_then( |own_prof_capnp| OwnProfile::try_from(own_prof_capnp) ) )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed to claim: {:?}", e) ) );
+            .map_err( |e| e.context(ErrorKind::FailedToClaimProfile).into() );
 
         Box::new(resp_fut)
     }
 
 
     fn register(&self, own_profile: OwnProfile, half_proof: RelationHalfProof, invite: Option<HomeInvitation>) ->
-        Box< Future<Item=OwnProfile, Error=(OwnProfile,ErrorToBeSpecified)> >
+        Box< Future<Item=OwnProfile, Error=(OwnProfile,mercury_home_protocol::Error)> >
     {
         let mut request = self.home.register_request();
         request.get().init_own_profile().fill_from(&own_profile);
@@ -144,14 +146,14 @@ impl Home for HomeClientCapnProto
                 resp.get()
                     .and_then( |res| res.get_own_profile() )
                     .and_then( |own_prof_capnp| OwnProfile::try_from(own_prof_capnp) ) )
-            .map_err( move |e| (own_profile, ErrorToBeSpecified::TODO( format!("Failed to register: {:?}", e) ) ) );
+            .map_err( move |e| (own_profile, e.context(mercury_home_protocol::ErrorKind::ResponseFailed).into() ) );
 
         Box::new(resp_fut)
     }
 
 
     fn login(&self, proof_of_home: &RelationProof) ->
-        Box< Future<Item=Rc<HomeSession>, Error=ErrorToBeSpecified> >
+        Box< Future<Item=Rc<HomeSession>, Error=mercury_home_protocol::Error> >
     {
         let mut request = self.home.login_request();
         request.get().init_proof_of_home().fill_from(proof_of_home);
@@ -165,7 +167,7 @@ impl Home for HomeClientCapnProto
                     .map( |session_client| Rc::new(
                         HomeSessionClientCapnProto::new(session_client, handle_clone) ) as Rc<HomeSession> )
             } )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed to login: {:?}", e) ) );
+            .map_err( |e| e.context(mercury_home_protocol::ErrorKind::FailedToCreateSession).into() );
 
         Box::new(resp_fut)
     }
@@ -173,14 +175,14 @@ impl Home for HomeClientCapnProto
 
     // NOTE acceptor must have this server as its home
     fn pair_request(&self, half_proof: RelationHalfProof) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >
+        Box< Future<Item=(), Error=mercury_home_protocol::Error> >
     {
         let mut request = self.home.pair_request_request();
         request.get().init_half_proof().fill_from(&half_proof);
 
         let resp_fut = request.send().promise
             .map( |_resp| () )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed.pair_request: {:?}", e) ) );
+            .map_err( |e| e.context(mercury_home_protocol::ErrorKind::PairRequestFailed).into() );
 
         Box::new(resp_fut)
     }
@@ -188,21 +190,21 @@ impl Home for HomeClientCapnProto
 
     // NOTE acceptor must have this server as its home
     fn pair_response(&self, relation_proof: RelationProof) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >
+        Box< Future<Item=(), Error=mercury_home_protocol::Error> >
     {
         let mut request = self.home.pair_response_request();
         request.get().init_relation().fill_from(&relation_proof);
 
         let resp_fut = request.send().promise
             .map( |_resp| () )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed pair_response: {:?}", e) ) );
+            .map_err( |e| e.context(mercury_home_protocol::ErrorKind::FailedToReadResponse).into() );
 
         Box::new(resp_fut)
     }
 
 
     fn call(&self, app: ApplicationId, call_req: CallRequestDetails) ->
-        Box< Future<Item=Option<AppMsgSink>, Error=ErrorToBeSpecified> >
+        Box< Future<Item=Option<AppMsgSink>, Error=Error> >
     {
         let mut request = self.home.call_request();
         request.get().init_relation().fill_from(&call_req.relation);
@@ -225,7 +227,7 @@ impl Home for HomeClientCapnProto
                     .ok()
                 )
             )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed call: {:?}", e) ) );
+            .map_err( |e| e.context(ErrorKind::CallFailed).into() );
 
         Box::new(resp_fut)
     }
@@ -292,14 +294,14 @@ impl HomeSession for HomeSessionClientCapnProto
     // TODO consider if an OwnProfile return value is needed or how to force updating
     //      the currently active profile in all PeerContext/Session/etc instances
     fn update(&self, own_prof: OwnProfile) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >
+        Box< Future<Item=(), Error=Error> >
     {
         let mut request = self.session.update_request();
         request.get().init_own_profile().fill_from(&own_prof);
 
         let resp_fut = request.send().promise
             .map( |_resp| () )
-            .map_err(  |e| ErrorToBeSpecified::TODO( format!("Failed to update: {:?}", e) ) );
+            .map_err(  |e| e.context(ErrorKind::ProfileUpdateFailed).into());
 
         Box::new(resp_fut)
     }
@@ -307,7 +309,7 @@ impl HomeSession for HomeSessionClientCapnProto
 
     // NOTE newhome is a profile that contains at least one HomeFacet different than this home
     fn unregister(&self, newhome: Option<Profile>) ->
-        Box< Future<Item=(), Error=ErrorToBeSpecified> >
+        Box< Future<Item=(), Error=Error> >
     {
         let mut request = self.session.unregister_request();
         if let Some(new_home_profile) = newhome
@@ -315,7 +317,7 @@ impl HomeSession for HomeSessionClientCapnProto
 
         let resp_fut = request.send().promise
             .map( |_resp| () )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed to unregister: {:?}", e) ) );
+            .map_err( |e| e.context(ErrorKind::UnregisterFailed).into() );
 
         Box::new(resp_fut)
     }
@@ -376,7 +378,7 @@ impl HomeSession for HomeSessionClientCapnProto
 
 
     fn ping(&self, txt: &str) ->
-        Box< Future<Item=String, Error=ErrorToBeSpecified> >
+        Box< Future<Item=String, Error=Error> >
     {
         let mut request = self.session.ping_request();
         request.get().set_txt(txt);
@@ -388,7 +390,7 @@ impl HomeSession for HomeSessionClientCapnProto
                     .and_then( |res| res.get_pong() )
                     .map( |pong| pong.to_owned() )
             } )
-            .map_err( |e| ErrorToBeSpecified::TODO( format!("Failed to.ping: {:?}", e) ) );
+            .map_err( |e| e.context(ErrorKind::PingFailed).into() );
 
         Box::new(resp_fut)
     }
